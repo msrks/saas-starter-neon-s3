@@ -80,18 +80,33 @@ async function checkStripeCLI() {
 async function getPostgresURL(): Promise<string> {
   console.log('Step 2: Setting up Postgres');
   const dbChoice = await question(
-    'Do you want to use a local Postgres instance with Docker (L) or a remote Postgres instance (R)? (L/R): '
+    'Do you want to use Neon as your Postgres database (N) or a local Postgres instance (L) or a different Remote Postgres instance (R)? (N/L/R): '
   );
 
-  if (dbChoice.toLowerCase() === 'l') {
+  if (dbChoice.toLowerCase() === 'n') {
+    return await setupNeonPostgres();
+  } else if (dbChoice.toLowerCase() === 'l') {
     console.log('Setting up local Postgres instance with Docker...');
     await setupLocalPostgres();
-    return 'postgres://postgres:postgres@localhost:54322/postgres';
-  } else {
-    console.log(
-      'You can find Postgres databases at: https://vercel.com/marketplace?category=databases'
-    );
+    return 'postgres://postgres:postgres@localhost:5432/main';
+  } else  {
     return await question('Enter your POSTGRES_URL: ');
+  }
+}
+
+async function setupNeonPostgres() {
+  console.log('Setting up Neon Postgres...');
+  try {
+    const projectName = await question('Enter a name for your Neon project: ');
+    const { stdout: outputJSON } = await execAsync(`neon projects create --name ${projectName} --region-id aws-us-west-2 --output json`);
+    const { project } = JSON.parse(outputJSON);
+    console.log('Neon project created successfully.');
+    const { stdout: connectionString } = await execAsync(`neon connection-string --project-id ${project.id}`);
+    return connectionString.trim();
+  } catch (error) {
+    console.error('Failed to create Neon project or get connection string.');
+    console.log('Please ensure you are logged in to Neon CLI with: neon auth');
+    process.exit(1);
   }
 }
 
@@ -114,19 +129,34 @@ async function setupLocalPostgres() {
   const dockerComposeContent = `
 services:
   postgres:
-    image: postgres:16.4-alpine
-    container_name: next_saas_starter_postgres
-    environment:
-      POSTGRES_DB: postgres
-      POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: postgres
-    ports:
-      - "54322:5432"
+    image: postgres:17
+    command: '-d 1'
     volumes:
-      - postgres_data:/var/lib/postgresql/data
+      - db_data:/var/lib/postgresql/data
+    ports:
+      - '5432:5432'
+    environment:
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=postgres
+      - POSTGRES_DB=main
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U postgres']
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  neon-proxy:
+    image: ghcr.io/timowilhelm/local-neon-http-proxy:main
+    environment:
+      - PG_CONNECTION_STRING=postgres://postgres:postgres@postgres:5432/main
+    ports:
+      - '4444:4444'
+    depends_on:
+      postgres:
+        condition: service_healthy
 
 volumes:
-  postgres_data:
+  db_data:
 `;
 
   await fs.writeFile(
